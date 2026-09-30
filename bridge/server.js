@@ -1,434 +1,581 @@
-const http = require("http");
-const https = require("https");
+const express = require("express");
 
-const PORT = Number(process.env.PORT || 48721);
+const app = express();
 
-const OPENAI_API_KEY = process.env.OPENAI_API_KEY;
-const OPENAI_MODEL = process.env.OPENAI_MODEL || "gpt-5.6-luna";
+const PORT = process.env.PORT || 10000;
 
-const GITHUB_TOKEN = process.env.GITHUB_TOKEN || "";
-const GITHUB_OWNER = process.env.GITHUB_OWNER || "";
-const GITHUB_REPO = process.env.GITHUB_REPO || "";
-const GITHUB_BRANCH = process.env.GITHUB_BRANCH || "main";
+app.use(express.json({
+    limit: "5mb"
+}));
 
-if (!OPENAI_API_KEY) {
-    console.error("ERROR: OPENAI_API_KEY is not set.");
-    console.error("Set your OpenAI API key before starting the bridge.");
-    process.exit(1);
-}
+/*
+    ============================================
+    PROVIDERS
+    ============================================
 
-function sendJSON(res, statusCode, data) {
-    const body = JSON.stringify(data);
+    PROVIDER can be:
 
-    res.writeHead(statusCode, {
-        "Content-Type": "application/json",
-        "Access-Control-Allow-Origin": "*",
-        "Access-Control-Allow-Headers": "Content-Type",
-        "Access-Control-Allow-Methods": "GET,POST,OPTIONS",
-    });
+    openai
+    gemini
+    anthropic
+    openai-compatible
 
-    res.end(body);
-}
+    Example Render environment variables:
 
-function readBody(req) {
-    return new Promise((resolve, reject) => {
-        let body = "";
+    AI_PROVIDER=openai
+    AI_MODEL=gpt-5
+    OPENAI_API_KEY=...
 
-        req.on("data", chunk => {
-            body += chunk;
+    OR
 
-            if (body.length > 5 * 1024 * 1024) {
-                reject(new Error("Request body is too large."));
-                req.destroy();
-            }
-        });
+    AI_PROVIDER=gemini
+    AI_MODEL=gemini-3.1-pro
+    GEMINI_API_KEY=...
 
-        req.on("end", () => {
-            try {
-                resolve(body ? JSON.parse(body) : {});
-            } catch {
-                reject(new Error("Invalid JSON."));
-            }
-        });
+    OR
 
-        req.on("error", reject);
-    });
-}
+    AI_PROVIDER=anthropic
+    AI_MODEL=...
+    ANTHROPIC_API_KEY=...
+*/
 
-function requestJSON(url, options = {}, body = null) {
-    return new Promise((resolve, reject) => {
-        const target = new URL(url);
+const PROVIDER =
+    process.env.AI_PROVIDER || "openai";
 
-        const req = https.request(
-            {
-                hostname: target.hostname,
-                port: target.port || 443,
-                path: target.pathname + target.search,
-                method: options.method || "GET",
-                headers: {
-                    "Content-Type": "application/json",
-                    ...(options.headers || {}),
-                },
-            },
-            res => {
-                let data = "";
+const MODEL =
+    process.env.AI_MODEL || "gpt-5";
 
-                res.on("data", chunk => {
-                    data += chunk;
-                });
+const SYSTEM_PROMPT = `
+You are Connect AI, an expert Roblox Studio development agent.
 
-                res.on("end", () => {
-                    let parsed;
+Your job is to understand the user's Roblox Studio request
+and produce structured actions that a Roblox Studio plugin can execute.
 
-                    try {
-                        parsed = data ? JSON.parse(data) : {};
-                    } catch {
-                        parsed = {
-                            raw: data,
-                        };
-                    }
+You can create:
 
-                    if (res.statusCode >= 200 && res.statusCode < 300) {
-                        resolve(parsed);
-                    } else {
-                        const error = new Error(
-                            `HTTP ${res.statusCode}: ${data}`
-                        );
-
-                        error.statusCode = res.statusCode;
-                        error.response = parsed;
-
-                        reject(error);
-                    }
-                });
-            }
-        );
-
-        req.on("error", reject);
-
-        if (body !== null) {
-            req.write(JSON.stringify(body));
-        }
-
-        req.end();
-    });
-}
-
-async function openAIChat(message, context = {}) {
-    const systemPrompt = `
-You are Connect AI, an AI assistant built into Roblox Studio.
-
-The user can send you ANY normal message.
-
-You should understand:
-- Normal questions
-- Roblox Studio questions
-- Lua/Luau
-- Game development
-- UI creation
-- Map creation
 - Parts
-- Models
+- MeshParts
 - Folders
+- Models
+- SpawnLocations
 - Scripts
-- RemoteEvents
-- RemoteFunctions
+- LocalScripts
+- ModuleScripts
+- Attachments
+- ProximityPrompts
+- ClickDetectors
+- StringValues
+- NumberValues
+- BoolValues
+- IntValues
+- ObjectValues
 - GUIs
-- Workspace objects
-- ServerScriptService
-- ReplicatedStorage
-- StarterGui
-- StarterPlayer
-- ServerStorage
-- Studio plugins
-- GitHub projects
-- Debugging
-- Code generation
-- Code explanations
-- Game design
-- Building instructions
+- Lighting settings
+- Properties
+- CFrames
+- Colors
+- Materials
+- Sizes
+- Positions
+- Scripts and Luau code
 
-Do not require the user to use a special command format.
+You can also modify or delete objects when explicitly requested.
 
-If the user asks a normal question, answer normally.
+IMPORTANT:
 
-If the user asks for code, provide complete usable code.
+Never return executable actions outside the JSON format.
 
-If the user asks for a Roblox object to be created, explain exactly what should be created and where.
+Return ONLY valid JSON.
 
-If the user asks to modify an existing object, use the supplied Studio context.
+The JSON format is:
 
-Be concise but useful.
+{
+    "message": "short explanation",
+    "actions": [
+        {
+            "type": "...",
+            "...": "..."
+        }
+    ]
+}
 
-Never pretend that an action was actually performed in Roblox Studio unless the bridge/plugin confirms it.
+Available actions:
 
-Studio context:
-${JSON.stringify(context, null, 2)}
+create_part
+create_folder
+create_model
+create_spawn
+create_script
+create_localscript
+create_modulescript
+set_property
+delete_instance
+
+For create_part:
+
+{
+    "type": "create_part",
+    "name": "PartName",
+    "parent": "Workspace",
+    "size": [10, 1, 10],
+    "position": [0, 5, 0],
+    "color": [255, 0, 0],
+    "material": "Plastic",
+    "anchored": true,
+    "canCollide": true
+}
+
+For create_script:
+
+{
+    "type": "create_script",
+    "name": "ScriptName",
+    "parent": "Workspace",
+    "source": "print('Hello')"
+}
+
+For create_localscript:
+
+{
+    "type": "create_localscript",
+    "name": "ClientScript",
+    "parent": "StarterPlayer.StarterPlayerScripts",
+    "source": "print('Hello')"
+}
+
+For create_modulescript:
+
+{
+    "type": "create_modulescript",
+    "name": "Module",
+    "parent": "ReplicatedStorage",
+    "source": "local Module = {}\\nreturn Module"
+}
+
+For set_property:
+
+{
+    "type": "set_property",
+    "path": "Workspace.Part",
+    "property": "Transparency",
+    "value": 0.5
+}
+
+For delete_instance:
+
+{
+    "type": "delete_instance",
+    "path": "Workspace.Part"
+}
+
+When creating scripts, write complete working Luau.
+
+When the user asks for a game system, create all required
+objects and scripts instead of only explaining how to build them.
+
+Use the project context supplied by the plugin.
+
+Do not invent objects that the plugin says do not exist.
+
+If a request is ambiguous, make a reasonable Roblox-development
+assumption and explain it in the "message" field.
+
+Return valid JSON only.
 `;
 
-    const payload = {
-        model: OPENAI_MODEL,
-        input: [
-            {
-                role: "system",
-                content: [
-                    {
-                        type: "input_text",
-                        text: systemPrompt,
-                    },
-                ],
-            },
-            {
-                role: "user",
-                content: [
-                    {
-                        type: "input_text",
-                        text: message,
-                    },
-                ],
-            },
-        ],
-    };
+/* ============================================
+   HELPERS
+============================================ */
 
-    const result = await requestJSON(
+function cleanJSON(text) {
+    if (!text) {
+        throw new Error("AI returned an empty response.");
+    }
+
+    text = text.trim();
+
+    if (text.startsWith("```")) {
+        text = text
+            .replace(/^```json\s*/i, "")
+            .replace(/^```\s*/i, "")
+            .replace(/\s*```$/i, "");
+    }
+
+    return JSON.parse(text);
+}
+
+/* ============================================
+   OPENAI
+============================================ */
+
+async function callOpenAI(prompt) {
+
+    const key = process.env.OPENAI_API_KEY;
+
+    if (!key) {
+        throw new Error(
+            "OPENAI_API_KEY is missing."
+        );
+    }
+
+    const response = await fetch(
         "https://api.openai.com/v1/responses",
         {
             method: "POST",
+
             headers: {
-                Authorization: `Bearer ${OPENAI_API_KEY}`,
+                "Content-Type": "application/json",
+                "Authorization": `Bearer ${key}`
             },
-        },
-        payload
+
+            body: JSON.stringify({
+                model: MODEL,
+
+                input: [
+                    {
+                        role: "system",
+                        content: SYSTEM_PROMPT
+                    },
+                    {
+                        role: "user",
+                        content: prompt
+                    }
+                ]
+            })
+        }
     );
 
-    let text = "";
+    const data = await response.json();
 
-    if (typeof result.output_text === "string") {
-        text = result.output_text;
-    }
-
-    if (!text && Array.isArray(result.output)) {
-        for (const item of result.output) {
-            if (!Array.isArray(item.content)) continue;
-
-            for (const content of item.content) {
-                if (
-                    content.type === "output_text" &&
-                    typeof content.text === "string"
-                ) {
-                    text += content.text;
-                }
-            }
-        }
-    }
-
-    if (!text) {
-        text = "The AI returned an empty response.";
-    }
-
-    return {
-        text,
-        model: OPENAI_MODEL,
-    };
-}
-
-async function githubPutFile(data) {
-    if (!GITHUB_TOKEN || !GITHUB_OWNER || !GITHUB_REPO) {
+    if (!response.ok) {
         throw new Error(
-            "GitHub is not configured. Set GITHUB_TOKEN, GITHUB_OWNER and GITHUB_REPO."
+            data?.error?.message ||
+            "OpenAI request failed."
         );
     }
 
-    const path = String(data.path || "").replace(/^\/+/, "");
+    return data.output_text;
+}
 
-    if (!path) {
-        throw new Error("GitHub file path is required.");
-    }
+/* ============================================
+   GEMINI
+============================================ */
 
-    const content = String(data.content || "");
+async function callGemini(prompt) {
 
-    const encodedContent = Buffer.from(content, "utf8").toString("base64");
+    const key = process.env.GEMINI_API_KEY;
 
-    const apiPath =
-        `/repos/${encodeURIComponent(GITHUB_OWNER)}` +
-        `/${encodeURIComponent(GITHUB_REPO)}` +
-        `/contents/${path}`;
-
-    let existingFile = null;
-
-    try {
-        existingFile = await requestJSON(
-            `https://api.github.com${apiPath}?ref=${encodeURIComponent(
-                data.branch || GITHUB_BRANCH
-            )}`,
-            {
-                method: "GET",
-                headers: {
-                    Authorization: `Bearer ${GITHUB_TOKEN}`,
-                    Accept: "application/vnd.github+json",
-                    "User-Agent": "Roblox-Connect-AI",
-                },
-            }
+    if (!key) {
+        throw new Error(
+            "GEMINI_API_KEY is missing."
         );
-    } catch (error) {
-        if (error.statusCode !== 404) {
-            throw error;
-        }
     }
 
-    const payload = {
-        message:
-            data.commitMessage ||
-            `Connect AI: update ${path}`,
-        content: encodedContent,
-        branch: data.branch || GITHUB_BRANCH,
-    };
+    const url =
+        `https://generativelanguage.googleapis.com/v1beta/models/${MODEL}:generateContent`;
 
-    if (existingFile && existingFile.sha) {
-        payload.sha = existingFile.sha;
-    }
+    const response = await fetch(url, {
+        method: "POST",
 
-    return await requestJSON(
-        `https://api.github.com${apiPath}`,
-        {
-            method: "PUT",
-            headers: {
-                Authorization: `Bearer ${GITHUB_TOKEN}`,
-                Accept: "application/vnd.github+json",
-                "User-Agent": "Roblox-Connect-AI",
-            },
+        headers: {
+            "Content-Type": "application/json",
+            "x-goog-api-key": key
         },
-        payload
-    );
-}
 
-async function handleRequest(req, res) {
-    if (req.method === "OPTIONS") {
-        res.writeHead(204, {
-            "Access-Control-Allow-Origin": "*",
-            "Access-Control-Allow-Headers": "Content-Type",
-            "Access-Control-Allow-Methods": "GET,POST,OPTIONS",
-        });
+        body: JSON.stringify({
+            systemInstruction: {
+                parts: [
+                    {
+                        text: SYSTEM_PROMPT
+                    }
+                ]
+            },
 
-        res.end();
-        return;
-    }
+            contents: [
+                {
+                    role: "user",
+                    parts: [
+                        {
+                            text: prompt
+                        }
+                    ]
+                }
+            ],
 
-    const url = new URL(
-        req.url,
-        `http://127.0.0.1:${PORT}`
-    );
-
-    if (req.method === "GET" && url.pathname === "/health") {
-        sendJSON(res, 200, {
-            ok: true,
-            service: "Connect AI Bridge",
-            port: PORT,
-            githubConfigured:
-                Boolean(
-                    GITHUB_TOKEN &&
-                    GITHUB_OWNER &&
-                    GITHUB_REPO
-                ),
-            openAIConfigured: Boolean(OPENAI_API_KEY),
-            model: OPENAI_MODEL,
-        });
-
-        return;
-    }
-
-    if (req.method === "POST" && url.pathname === "/chat") {
-        try {
-            const data = await readBody(req);
-
-            const message = String(data.message || "").trim();
-
-            if (!message) {
-                sendJSON(res, 400, {
-                    ok: false,
-                    error: "Message is required.",
-                });
-
-                return;
+            generationConfig: {
+                responseMimeType: "application/json"
             }
-
-            const result = await openAIChat(
-                message,
-                data.context || {}
-            );
-
-            sendJSON(res, 200, {
-                ok: true,
-                text: result.text,
-                model: result.model,
-                actions: [],
-            });
-        } catch (error) {
-            console.error("Chat error:", error);
-
-            sendJSON(res, 500, {
-                ok: false,
-                error: error.message || "AI request failed.",
-            });
-        }
-
-        return;
-    }
-
-    if (req.method === "POST" && url.pathname === "/github/put") {
-        try {
-            const data = await readBody(req);
-
-            const result = await githubPutFile(data);
-
-            sendJSON(res, 200, {
-                ok: true,
-                message: "File uploaded to GitHub.",
-                result,
-            });
-        } catch (error) {
-            console.error("GitHub error:", error);
-
-            sendJSON(res, 500, {
-                ok: false,
-                error: error.message || "GitHub request failed.",
-            });
-        }
-
-        return;
-    }
-
-    sendJSON(res, 404, {
-        ok: false,
-        error: "Not found.",
+        })
     });
+
+    const data = await response.json();
+
+    if (!response.ok) {
+        throw new Error(
+            data?.error?.message ||
+            "Gemini request failed."
+        );
+    }
+
+    return (
+        data
+            ?.candidates?.[0]
+            ?.content?.parts?.[0]
+            ?.text || ""
+    );
 }
 
-const server = http.createServer((req, res) => {
-    handleRequest(req, res).catch(error => {
-        console.error("Unhandled error:", error);
+/* ============================================
+   ANTHROPIC
+============================================ */
 
-        sendJSON(res, 500, {
-            ok: false,
-            error: "Internal server error.",
-        });
+async function callAnthropic(prompt) {
+
+    const key =
+        process.env.ANTHROPIC_API_KEY;
+
+    if (!key) {
+        throw new Error(
+            "ANTHROPIC_API_KEY is missing."
+        );
+    }
+
+    const response = await fetch(
+        "https://api.anthropic.com/v1/messages",
+        {
+            method: "POST",
+
+            headers: {
+                "Content-Type": "application/json",
+                "x-api-key": key,
+                "anthropic-version": "2023-06-01"
+            },
+
+            body: JSON.stringify({
+                model: MODEL,
+
+                max_tokens: 20000,
+
+                system: SYSTEM_PROMPT,
+
+                messages: [
+                    {
+                        role: "user",
+                        content: prompt
+                    }
+                ]
+            })
+        }
+    );
+
+    const data = await response.json();
+
+    if (!response.ok) {
+        throw new Error(
+            data?.error?.message ||
+            "Anthropic request failed."
+        );
+    }
+
+    return (
+        data?.content
+            ?.filter(x => x.type === "text")
+            ?.map(x => x.text)
+            ?.join("") || ""
+    );
+}
+
+/* ============================================
+   OPENAI COMPATIBLE
+============================================ */
+
+async function callOpenAICompatible(prompt) {
+
+    const key =
+        process.env.AI_API_KEY;
+
+    const base =
+        process.env.AI_BASE_URL;
+
+    if (!key) {
+        throw new Error(
+            "AI_API_KEY is missing."
+        );
+    }
+
+    if (!base) {
+        throw new Error(
+            "AI_BASE_URL is missing."
+        );
+    }
+
+    const response = await fetch(
+        `${base.replace(/\/$/, "")}/chat/completions`,
+        {
+            method: "POST",
+
+            headers: {
+                "Content-Type": "application/json",
+                "Authorization": `Bearer ${key}`
+            },
+
+            body: JSON.stringify({
+                model: MODEL,
+
+                messages: [
+                    {
+                        role: "system",
+                        content: SYSTEM_PROMPT
+                    },
+                    {
+                        role: "user",
+                        content: prompt
+                    }
+                ],
+
+                temperature: 0
+            })
+        }
+    );
+
+    const data = await response.json();
+
+    if (!response.ok) {
+        throw new Error(
+            data?.error?.message ||
+            "Compatible AI request failed."
+        );
+    }
+
+    return (
+        data?.choices?.[0]
+            ?.message?.content || ""
+    );
+}
+
+/* ============================================
+   PROVIDER ROUTER
+============================================ */
+
+async function askAI(prompt) {
+
+    switch (PROVIDER.toLowerCase()) {
+
+        case "openai":
+            return callOpenAI(prompt);
+
+        case "gemini":
+            return callGemini(prompt);
+
+        case "anthropic":
+            return callAnthropic(prompt);
+
+        case "openai-compatible":
+            return callOpenAICompatible(prompt);
+
+        default:
+            throw new Error(
+                `Unknown AI provider: ${PROVIDER}`
+            );
+    }
+}
+
+/* ============================================
+   API
+============================================ */
+
+app.get("/health", (req, res) => {
+
+    res.json({
+        ok: true,
+        service: "Connect AI",
+        provider: PROVIDER,
+        model: MODEL
     });
+
 });
 
-server.listen(PORT, "127.0.0.1", () => {
-    console.log("======================================");
-    console.log("       Connect AI Bridge");
-    console.log("======================================");
-    console.log(`Running on: http://127.0.0.1:${PORT}`);
-    console.log(`Model: ${OPENAI_MODEL}`);
+app.post("/api/build", async (req, res) => {
+
+    try {
+
+        const {
+            message,
+            project
+        } = req.body;
+
+        if (
+            typeof message !== "string" ||
+            !message.trim()
+        ) {
+
+            return res.status(400).json({
+                error: "message is required"
+            });
+
+        }
+
+        const prompt = `
+USER REQUEST:
+
+${message}
+
+ROBLOX STUDIO PROJECT CONTEXT:
+
+${JSON.stringify(
+    project || {},
+    null,
+    2
+)}
+
+Generate the required Roblox Studio actions.
+`;
+
+        const raw = await askAI(prompt);
+
+        const result = cleanJSON(raw);
+
+        if (
+            !result ||
+            !Array.isArray(result.actions)
+        ) {
+
+            throw new Error(
+                "AI response does not contain actions."
+            );
+
+        }
+
+        res.json(result);
+
+    } catch (error) {
+
+        console.error(error);
+
+        res.status(500).json({
+            error: error.message
+        });
+
+    }
+
+});
+
+/* ============================================
+   START
+============================================ */
+
+app.listen(PORT, () => {
+
     console.log(
-        `GitHub: ${
-            GITHUB_TOKEN &&
-            GITHUB_OWNER &&
-            GITHUB_REPO
-                ? "configured"
-                : "not configured"
-        }`
+        `Connect AI running on port ${PORT}`
     );
-    console.log("======================================");
+
+    console.log(
+        `Provider: ${PROVIDER}`
+    );
+
+    console.log(
+        `Model: ${MODEL}`
+    );
+
 });
