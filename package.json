@@ -1,11 +1,15 @@
+
 {
-  "name": "connect-ai-roblox-assistant",
-  "version": "1.0.0",
-  "private": true,
-  "description": "An original AI web assistant with a Roblox Studio plugin bridge.",
+  "name": "connect-ai-roblox-studio",
+  "version": "1.2.0",
+  "description": "Gemini-powered AI website and Roblox Studio plugin bridge",
   "main": "server.js",
-  "scripts": { "start": "node server.js" },
-  "engines": { "node": ">=18" },
+  "scripts": {
+    "start": "node server.js"
+  },
+  "engines": {
+    "node": ">=18"
+  },
   "dependencies": {
     "dotenv": "^16.4.7",
     "express": "^4.21.2"
