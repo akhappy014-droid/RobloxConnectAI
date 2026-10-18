@@ -15,6 +15,7 @@ app.use(express.static(path.join(__dirname, "public")));
 
 const queue = [];
 const MAX_QUEUE = 20;
+const MAX_CONTEXT_CHARS = 90000;
 
 const PROPERTY_ALLOWLIST = new Set([
   "Name", "Anchored", "CanCollide", "CanTouch", "CanQuery",
@@ -35,11 +36,10 @@ const PROPERTY_ALLOWLIST = new Set([
   "PlaceholderText", "ClearTextOnFocus", "MultiLine", "TextEditable",
   "AnchorPoint", "AutomaticSize", "FillDirection", "HorizontalAlignment",
   "VerticalAlignment", "SortOrder", "ScaleType", "TileSize",
-  "TileSize", "ImageRectOffset", "ImageRectSize", "Rotation",
-  "LineHeight", "MaxVisibleGraphemes", "TextDirection",
-  "Padding", "TextStrokeColor3", "Adornee", "Attachment0",
-  "Attachment1", "Brightness", "Color", "Enabled", "Face",
-  "LightInfluence", "Size", "StudsOffsetWorldSpace"
+  "ImageRectOffset", "ImageRectSize", "LineHeight",
+  "MaxVisibleGraphemes", "TextDirection", "Padding",
+  "TextStrokeColor3", "Adornee", "Attachment0", "Attachment1",
+  "LightInfluence", "StudsOffsetWorldSpace"
 ]);
 
 const ALLOWED_CLASSES = new Set([
@@ -71,8 +71,10 @@ function tokenMatches(a, b) {
 }
 
 function bridgeAuth(req, res, next) {
-  if (!BRIDGE_TOKEN ||
-      !tokenMatches(req.get("x-bridge-token") || "", BRIDGE_TOKEN)) {
+  if (
+    !BRIDGE_TOKEN ||
+    !tokenMatches(req.get("x-bridge-token") || "", BRIDGE_TOKEN)
+  ) {
     return res.status(401).json({ error: "Invalid bridge token." });
   }
 
@@ -155,8 +157,10 @@ function cleanAction(action) {
     };
   }
 
-  if (action.type === "create_model" ||
-      action.type === "create_folder") {
+  if (
+    action.type === "create_model" ||
+    action.type === "create_folder"
+  ) {
     return {
       type: action.type,
       name,
@@ -184,8 +188,10 @@ function cleanAction(action) {
   }
 
   if (action.type === "set_script_source") {
-    if (typeof action.source !== "string" ||
-        action.source.length > 50000) {
+    if (
+      typeof action.source !== "string" ||
+      action.source.length > 50000
+    ) {
       return null;
     }
 
@@ -225,9 +231,14 @@ function cleanAction(action) {
 }
 
 function queueActions(actions) {
-  if (!Array.isArray(actions) || queue.length >= MAX_QUEUE) return 0;
+  if (!Array.isArray(actions) || queue.length >= MAX_QUEUE) {
+    return 0;
+  }
 
-  const cleaned = actions.map(cleanAction).filter(Boolean).slice(0, 40);
+  const cleaned = actions
+    .map(cleanAction)
+    .filter(Boolean)
+    .slice(0, 40);
 
   if (!cleaned.length) return 0;
 
@@ -380,14 +391,36 @@ function serializeContext(context) {
     selection: Array.isArray(ctx.selection)
       ? ctx.selection.slice(0, 20) : [],
     scripts: Array.isArray(ctx.scripts)
-      ? ctx.scripts.slice(0, 12) : [],
+      ? ctx.scripts.slice(0, 20) : [],
     project: Array.isArray(ctx.project)
       ? ctx.project.slice(0, 300) : [],
     positions: Array.isArray(ctx.positions)
       ? ctx.positions.slice(0, 250) : []
   };
 
-  return JSON.stringify(compact).slice(0, 42000);
+  // Preserve selected and request-relevant script source before trimming less useful inventory.
+  let serialized = JSON.stringify(compact);
+  if (serialized.length <= MAX_CONTEXT_CHARS) return serialized;
+
+  const reduced = { ...compact };
+  reduced.project = reduced.project.slice(0, 180);
+  reduced.positions = reduced.positions.slice(0, 120);
+  reduced.scripts = reduced.scripts.map(script => ({
+    ...script,
+    source: String(script.source || "").slice(0, 12000)
+  }));
+
+  serialized = JSON.stringify(reduced);
+  if (serialized.length <= MAX_CONTEXT_CHARS) return serialized;
+
+  // Last-resort budget reduction keeps source for the first selected/relevant scripts.
+  for (const script of reduced.scripts) {
+    if (serialized.length <= MAX_CONTEXT_CHARS) break;
+    script.source = String(script.source || "").slice(0, 4000);
+    serialized = JSON.stringify(reduced);
+  }
+
+  return serialized.slice(0, MAX_CONTEXT_CHARS);
 }
 
 function extractGeminiText(data) {
@@ -411,12 +444,21 @@ async function callGemini(messages, context) {
 
   const contextText = serializeContext(context);
 
-  const contents = messages.map(message => ({
-    role: message.role === "assistant" ? "model" : "user",
-    parts: [{
-      text: String(message.content || "").slice(0, 14000)
-    }]
-  }));
+  const contents = messages
+    .filter(message =>
+      message &&
+      (message.role === "user" || message.role === "assistant") &&
+      typeof message.content === "string" &&
+      message.content.trim()
+    )
+    .map(message => ({
+      role: message.role === "assistant" ? "model" : "user",
+      parts: [{ text: message.content.slice(0, 14000) }]
+    }));
+
+  if (!contents.length || contents[contents.length - 1].role !== "user") {
+    throw new Error("The conversation must end with a user message.");
+  }
 
   const response = await fetch(
     `${baseUrl}/models/${encodeURIComponent(model)}:generateContent?key=${encodeURIComponent(process.env.AI_API_KEY)}`,
@@ -470,8 +512,11 @@ app.post("/api/chat", async (req, res) => {
   try {
     const messages = req.body?.messages;
 
-    if (!Array.isArray(messages) || messages.length < 1 ||
-        messages.length > 40) {
+    if (
+      !Array.isArray(messages) ||
+      messages.length < 1 ||
+      messages.length > 40
+    ) {
       return res.status(400).json({
         error: "Provide between 1 and 40 messages."
       });
@@ -492,7 +537,11 @@ app.post("/api/chat", async (req, res) => {
         const parsed = JSON.parse(match[1]);
         actionCount = queueActions(parsed.actions);
       } catch (error) {
-        console.error("Gemini action JSON parsing failed:", error.message);
+        console.error(
+          "Gemini action JSON parsing failed:",
+          error.message
+        );
+
         visibleAnswer +=
           "\n\nI couldn't parse the proposed Studio actions. Please retry with a smaller change.";
       }
@@ -540,15 +589,27 @@ app.post("/api/bridge/context", bridgeAuth, (req, res) => {
     placeName: String(body.placeName || "").slice(0, 150),
     request: String(body.request || "").slice(0, 1500),
     totalInstances: Number(body.totalInstances || 0),
-    selection: Array.isArray(body.selection) ? body.selection.slice(0, 20) : [],
-    project: Array.isArray(body.project) ? body.project.slice(0, 300) : [],
+    selection: Array.isArray(body.selection)
+      ? body.selection.slice(0, 20)
+      : [],
+    project: Array.isArray(body.project)
+      ? body.project.slice(0, 300)
+      : [],
     namedMatches: Array.isArray(body.namedMatches)
-      ? body.namedMatches.slice(0, 80) : [],
-    scripts: Array.isArray(body.scripts) ? body.scripts.slice(0, 12) : [],
-    positions: Array.isArray(body.positions) ? body.positions.slice(0, 250) : []
+      ? body.namedMatches.slice(0, 80)
+      : [],
+    scripts: Array.isArray(body.scripts)
+      ? body.scripts.slice(0, 20)
+      : [],
+    positions: Array.isArray(body.positions)
+      ? body.positions.slice(0, 250)
+      : []
   };
 
-  res.json({ ok: true, updatedAt: latestContext.updatedAt });
+  res.json({
+    ok: true,
+    updatedAt: latestContext.updatedAt
+  });
 });
 
 app.get("/api/bridge/context", bridgeAuth, (_req, res) => {
@@ -564,9 +625,12 @@ app.get("*", (req, res, next) => {
     return res.status(404).json({ error: "API route not found." });
   }
 
-  res.sendFile(path.join(__dirname, "public", "index.html"), error => {
-    if (error) next(error);
-  });
+  res.sendFile(
+    path.join(__dirname, "public", "index.html"),
+    error => {
+      if (error) next(error);
+    }
+  );
 });
 
 app.listen(PORT, () => {
