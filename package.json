@@ -1,10 +1,18 @@
 {
-  "name": "connect-ai-gemini-roblox-bridge",
-  "version": "1.1.0",
+  "name": "connect-ai-roblox-agent",
+  "version": "1.3.0",
   "private": true,
-  "description": "Gemini-powered Connect AI backend and Roblox Studio plugin bridge",
+  "description": "Project-aware Gemini Roblox Studio agent with Creator Store search and credits",
   "main": "server.js",
-  "scripts": { "start": "node server.js", "check": "node --check server.js" },
-  "engines": { "node": ">=20" },
-  "dependencies": { "dotenv": "^16.4.7", "express": "^4.21.2" }
+  "scripts": {
+    "start": "node server.js",
+    "check": "node --check server.js"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "dependencies": {
+    "dotenv": "^16.4.7",
+    "express": "^4.21.2"
+  }
 }
