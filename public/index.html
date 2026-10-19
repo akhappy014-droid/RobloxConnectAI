@@ -300,7 +300,11 @@ button:disabled{opacity:.45;cursor:not-allowed}
       const balance = Number(creditState.balance) || 0;
       $('creditValue').textContent = balance.toFixed(2);
       $('creditValue').style.color = balance <= floor ? 'var(--red)' : 'var(--text)';
-      $('creditNote').textContent = Number(creditState.requestCost || .05).toFixed(2) + ' credits per answer · locked at ' + Number(creditState.minimumBalance || floor).toFixed(2);
+      const costText = Number(creditState.requestCost || .05).toFixed(2) + ' credits per answer · locked at ' + Number(creditState.minimumBalance || floor).toFixed(2);
+      $('creditNote').textContent = creditState.persistence === 'memory'
+        ? 'WARNING: credits are in memory and may reset after restart.'
+        : costText;
+      $('creditNote').style.color = creditState.persistence === 'memory' ? 'var(--red)' : '';
       $('composeHint').innerHTML = 'Enter to send · Shift+Enter for a new line<br>' + balance.toFixed(2) + ' credits remaining';
       node('nodeCredit', balance <= floor ? 'error' : 'done', balance.toFixed(2) + ' credits');
       $('sendButton').disabled = balance <= floor && !isCommand($('promptInput').value.trim());
