@@ -16,6 +16,13 @@ const CREDIT_FLOOR = Math.max(0, Number(process.env.CREDIT_FLOOR || 0.20));
 const CREDIT_COST = Math.max(0.001, Number(process.env.CREDIT_COST || 0.05));
 const CREDIT_FILE = process.env.CREDITS_FILE || path.join(__dirname, "data", "credits.json");
 
+// Render's filesystem is ephemeral unless a persistent disk is mounted. If the
+// configured file cannot be written, keep Connect AI usable in memory and expose
+// a clear warning instead of failing every chat/credits request.
+let creditStorageMode = "file";
+let creditStorageWarning = "";
+let creditStorageWarningLogged = false;
+
 app.disable("x-powered-by");
 app.use(express.json({ limit: "2mb" }));
 app.use(express.static(path.join(__dirname, "public")));
@@ -32,18 +39,30 @@ try {
     if (loaded && typeof loaded === "object" && !Array.isArray(loaded)) creditStore = loaded;
   }
 } catch (error) {
-  console.error("Credit store could not be loaded:", error.message);
+  creditStorageWarning = `Could not load credit file ${CREDIT_FILE}: ${error.message}`;
+  console.error("[Connect AI] Credit store could not be loaded:", error.message);
 }
 
 function saveCreditStore() {
   try {
     fs.mkdirSync(path.dirname(CREDIT_FILE), { recursive: true });
-    const tempFile = `${CREDIT_FILE}.tmp`;
-    fs.writeFileSync(tempFile, JSON.stringify(creditStore, null, 2), "utf8");
+    const tempFile = `${CREDIT_FILE}.${process.pid}.tmp`;
+    fs.writeFileSync(tempFile, JSON.stringify(creditStore, null, 2), { encoding: "utf8", mode: 0o600 });
     fs.renameSync(tempFile, CREDIT_FILE);
+    creditStorageMode = "file";
+    creditStorageWarning = "";
+    creditStorageWarningLogged = false;
+    return true;
   } catch (error) {
-    console.error("Credit store could not be saved:", error.message);
-    throw new Error("Credit storage failed. Configure a persistent Render disk and CREDITS_FILE.");
+    // Do not reject a chat or /myid just because Render's disk isn't mounted.
+    // The live process remains functional, but balances may reset on restart.
+    creditStorageMode = "memory";
+    creditStorageWarning = `Credit balances are temporarily stored in memory because ${error.code || error.message}. Configure a writable persistent disk at ${path.dirname(CREDIT_FILE)} to preserve them across restarts.`;
+    if (!creditStorageWarningLogged) {
+      console.error("[Connect AI] CREDIT STORAGE WARNING:", creditStorageWarning);
+      creditStorageWarningLogged = true;
+    }
+    return false;
   }
 }
 
@@ -89,7 +108,9 @@ function creditResponse(clientId) {
     starterCredits: STARTER_CREDITS,
     minimumBalance: CREDIT_FLOOR,
     requestCost: CREDIT_COST,
-    canChat: record.balance > CREDIT_FLOOR
+    canChat: record.balance > CREDIT_FLOOR,
+    persistence: creditStorageMode,
+    storageWarning: creditStorageWarning || undefined
   };
 }
 
@@ -505,7 +526,9 @@ Use RGB arrays from 0 to 1 for Color3.
 Use [xScale,xOffset,yScale,yOffset] for UDim2.
 Use exact enum names for enum-valued properties.
 
-Supported create_instance classes include Parts, Models, Folders, ScreenGui and common GUI elements, prompts, lights, sounds, value objects, effects and Lua scripts. The plugin will enforce its own instance allowlist.
+Supported create_instance classes include Parts, Models, Folders,
+ScreenGui and common GUI elements, prompts, lights, sounds, value objects,
+effects and Lua scripts. The plugin will enforce its own instance allowlist.
 
 When Studio changes are needed, append:
 <ACTIONS_JSON>
@@ -733,6 +756,10 @@ app.get("/api/health", (_req, res) => {
     bridgeConfigured: Boolean(BRIDGE_TOKEN),
     toolboxConfigured: Boolean(ROBLOX_API_KEY),
     creditsConfigured: true,
+    creditPersistence: creditStorageMode,
+    creditStorageWarning: creditStorageWarning || undefined,
+    creditsFileConfigured: Boolean(CREDIT_FILE),
+    creditsFilePath: CREDIT_FILE,
     starterCredits: STARTER_CREDITS,
     minimumBalance: CREDIT_FLOOR,
     requestCost: CREDIT_COST
@@ -829,7 +856,7 @@ async function processChatBody(body) {
       try { saveCreditStore(); } catch (saveError) { console.error(saveError.message); }
     }
     console.error("Connect AI request failed:", error.message);
-    const status = /Missing AI_API_KEY|Credit storage failed/i.test(error.message) ? 503 : 502;
+    const status = /Missing AI_API_KEY/i.test(error.message) ? 503 : 502;
     const json = { error: error.message || "Connect AI request failed." };
     const id = normalizeClientId(body?.clientId);
     if (id) {
@@ -898,6 +925,7 @@ app.get("/api/chat/status/:jobId", bridgeAuth, (req, res) => {
   }
   return res.status(job.result.status).json({ jobId: req.params.jobId, state: "done", ...job.result.json });
 });
+
 app.get("/api/credits", bridgeAuth, (req, res) => {
   try {
     const clientId = normalizeClientId(req.query.clientId);
@@ -918,6 +946,7 @@ app.get("/api/toolbox/search", bridgeAuth, async (req, res) => {
     return res.status(502).json({ error: `Toolbox search failed: ${error.message}` });
   }
 });
+
 let latestContext = {
   connected: false,
   updatedAt: null,
